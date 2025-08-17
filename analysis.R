@@ -1,32 +1,42 @@
-# Load required libraries
-library(tidyverse)
-library(lubridate)
-library(cluster)
-library(factoextra)
-library(tidymodels)
-library(ranger)
+# -------------------------------------------------------
+# Adelaide Public Transport & Weather Data Analysis
+# Includes Regression, Clustering, and Random Forest Model
+# -------------------------------------------------------
 
-# Read data
+# ----- Load required libraries -----
+library(tidyverse)    # Data wrangling and visualization
+library(lubridate)    # Date parsing and handling
+library(cluster)      # Clustering algorithms
+library(factoextra)   # Visualization for clustering
+library(tidymodels)   # Machine learning workflow
+library(ranger)       # Random Forest engine
+
+# ----- Load Transport Data -----
 data1 <- read_csv("./data/bandedvalidations2024-01-02-03.csv")
 data2 <- read_csv("./data/bandedvalidations2024-04-05-06.csv")
 
+# Combine multiple months of transport data
 transport_data <- bind_rows(data1, data2)
 
-weather_data <- read_csv("./data/IDCJCM0034_023000.csv", skip = 10)  # Skip BOM metadata
+# ----- Load Weather Data -----
+# Skip metadata lines (BOM CSV files often contain headers before actual data)
+weather_data <- read_csv("./data/IDCJCM0034_023000.csv", skip = 10)
 
-# Clean transport data
+# ----- Clean Transport Data -----
 transport_data <- transport_data %>%
   mutate(
+    # Convert validation date to proper date format
     Date = parse_date_time(VALIDATION_DATE, orders = c("ymd", "dmy", "mdy")),
-    Month = month(Date, label = TRUE),
-    Year = year(Date),
+    Month = month(Date, label = TRUE),   # Extract month name
+    Year = year(Date),                   # Extract year
+    # Extract boarding band ranges (e.g., "50-100")
     BAND_BOARDINGS = str_extract(BAND_BOARDINGS, "\\d+-\\d+"),
     Band_Low = as.numeric(str_extract(BAND_BOARDINGS, "^\\d+")),
     Band_High = as.numeric(str_extract(BAND_BOARDINGS, "\\d+$")),
-    Avg_Boardings = (Band_Low + Band_High) / 2
+    Avg_Boardings = (Band_Low + Band_High) / 2  # Midpoint of range
   )
 
-# Summarise monthly boardings
+# ----- Summarise Monthly Boardings -----
 transport_monthly <- transport_data %>%
   group_by(Year, Month) %>%
   summarise(
@@ -34,37 +44,36 @@ transport_monthly <- transport_data %>%
     .groups = 'drop'
   )
 
-# Extract weather monthly max temperature row and format
+# ----- Extract Weather Data -----
+# Select first row with temperature values across months
 weather_row <- weather_data[1, 2:13] %>%
   pivot_longer(everything(), names_to = "Month", values_to = "Temperature") %>%
-  mutate(Month = factor(Month, levels = month.name))
+  mutate(Month = factor(Month, levels = month.name))  # Ensure month order
 
+# Match month abbreviations with full names for merging
 transport_monthly <- transport_monthly %>%
   mutate(Month = month.name[match(Month, month.abb)])
+
 # Merge transport and weather data
 combined_data <- transport_monthly %>%
   left_join(weather_row, by = "Month")
 
+# Convert columns to numeric
 combined_data <- combined_data %>%
-  mutate(Temperature = as.numeric(as.character(Temperature)))
-
-combined_data <- combined_data %>%
-  mutate(Total_Boardings = as.numeric(Total_Boardings))
-
+  mutate(
+    Temperature = as.numeric(as.character(Temperature)),
+    Total_Boardings = as.numeric(Total_Boardings)
+  )
 
 # ----- Regression Analysis -----
 combined_data_clean <- combined_data %>%
-  filter(!is.na(Total_Boardings) & !is.na(Temperature))
+  filter(!is.na(Total_Boardings) & !is.na(Temperature))  # Remove missing values
 
-# Scale cleaned data
-clust_data <- combined_data_clean %>%
-  select(Total_Boardings, Temperature) %>%
-  scale()
-
+# Linear regression: boardings vs temperature
 reg_model <- lm(Total_Boardings ~ Temperature, data = combined_data)
 summary(reg_model)
 
-# Regression Plot
+# Plot regression with confidence interval
 ggplot(combined_data, aes(x = Temperature, y = Total_Boardings)) +
   geom_point(size = 3, color = "blue") +
   geom_smooth(method = "lm", se = TRUE, color = "darkred") +
@@ -76,21 +85,22 @@ ggplot(combined_data, aes(x = Temperature, y = Total_Boardings)) +
   theme_minimal()
 
 # ----- K-means Clustering -----
-# Scale data
+# Scale numerical features
 clust_data <- combined_data %>%
   select(Total_Boardings, Temperature) %>%
   scale() %>%
   as.data.frame()
 
-# Determine optimal clusters (elbow method)
-max_k <- nrow(clust_data) - 1  # max possible clusters
+# Elbow method to determine optimal k
+max_k <- nrow(clust_data) - 1
 fviz_nbclust(clust_data, kmeans, method = "wss", k.max = max_k) +
   labs(title = "Elbow Method for Optimal K")
-# Apply k-means (choose 3 clusters for example)
+
+# Apply K-means clustering (example: k=3)
 kmeans_model <- kmeans(clust_data, centers = 3, nstart = 25)
 combined_data$Cluster <- as.factor(kmeans_model$cluster)
 
-# Cluster Visualization
+# Visualize clusters
 ggplot(combined_data, aes(x = Temperature, y = Total_Boardings, color = Cluster)) +
   geom_point(size = 4) +
   labs(
@@ -100,27 +110,28 @@ ggplot(combined_data, aes(x = Temperature, y = Total_Boardings, color = Cluster)
   ) +
   theme_minimal()
 
-#Hierarchical Clustering -----
-dist_matrix <- dist(clust_data)
-hc <- hclust(dist_matrix, method = "ward.D2")
+# ----- Hierarchical Clustering -----
+dist_matrix <- dist(clust_data)                     # Distance matrix
+hc <- hclust(dist_matrix, method = "ward.D2")       # Hierarchical clustering
 
+# Dendrogram with 3 clusters
 fviz_dend(hc, k = 3, rect = TRUE) +
   labs(title = "Hierarchical Clustering Dendrogram")
 
-#-----------------------------------------
+# ----- Random Forest Regression -----
 model_data <- combined_data_clean %>%
   select(Total_Boardings, Temperature)
 
-# Split data
+# Split into training/testing sets
 set.seed(123)
 data_split <- initial_split(model_data, prop = 0.8)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Create recipe
+# Recipe for preprocessing
 rf_recipe <- recipe(Total_Boardings ~ Temperature, data = train_data)
 
-# Define random forest model
+# Define Random Forest model
 rf_model <- rand_forest(
   mode = "regression",
   trees = 500,
@@ -129,25 +140,25 @@ rf_model <- rand_forest(
 ) %>%
   set_engine("ranger")
 
-# Build workflow
+# Workflow setup
 rf_workflow <- workflow() %>%
   add_recipe(rf_recipe) %>%
   add_model(rf_model)
 
-# Fit model
+# Train model
 rf_fit <- rf_workflow %>% fit(data = train_data)
 
-# Predict and evaluate
+# Predict on test set
 rf_predictions <- rf_fit %>%
   predict(new_data = test_data) %>%
   bind_cols(test_data)
 
-# Performance metrics
+# Evaluate performance metrics
 rf_metrics <- rf_predictions %>%
   metrics(truth = Total_Boardings, estimate = .pred)
 print(rf_metrics)
 
-# Plot actual vs predicted
+# Plot actual vs predicted boardings
 ggplot(rf_predictions, aes(x = Total_Boardings, y = .pred)) +
   geom_point(color = "blue", size = 3) +
   geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
@@ -157,8 +168,9 @@ ggplot(rf_predictions, aes(x = Total_Boardings, y = .pred)) +
     y = "Predicted Boardings"
   ) +
   theme_minimal()
-#-----------------------------------------
-# Create Transport Type label if not already present
+
+# ----- Transport Type Analysis -----
+# Assign transport type labels
 transport_data <- transport_data %>%
   mutate(
     TRANSPORT_TYPE = case_when(
@@ -169,7 +181,7 @@ transport_data <- transport_data %>%
     )
   )
 
-# Group and summarise monthly boardings
+# Group monthly boardings by transport type
 monthly_boardings_by_type <- transport_data %>%
   group_by(Month, TRANSPORT_TYPE) %>%
   summarise(
@@ -177,7 +189,7 @@ monthly_boardings_by_type <- transport_data %>%
     .groups = 'drop'
   )
 
-# Grouped bar chart
+# Bar chart: boardings by transport type
 ggplot(monthly_boardings_by_type, aes(x = Month, y = Total_Avg_Boardings, fill = TRANSPORT_TYPE)) +
   geom_bar(stat = "identity", position = "dodge") +
   labs(
@@ -187,7 +199,7 @@ ggplot(monthly_boardings_by_type, aes(x = Month, y = Total_Avg_Boardings, fill =
   ) +
   theme_minimal()
 
-# Create a date label for time series plot
+# ----- Time Series of Total Boardings -----
 transport_monthly <- transport_monthly %>%
   mutate(Month_Year = paste(Year, Month, sep = "-"))
 
@@ -202,6 +214,7 @@ ggplot(transport_monthly, aes(x = Month_Year, y = Total_Boardings, group = 1)) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 60, hjust = 1))
 
+# ----- Summary Statistics -----
 summary_stats <- combined_data_clean %>%
   summarise(
     Min_Temp = min(Temperature, na.rm = TRUE),
